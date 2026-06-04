@@ -1,0 +1,185 @@
+// Unit tests for the protobuf wire-format codec. Network-free:
+// encode → decode round-trips, including binary-safety (a bytes field
+// containing NUL + 0xFF survives byte-for-byte).
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Formats.Protobuf
+
+public class Program {
+    static bool listEq(List<int> a, List<int> b) {
+        if (a.Count() != b.Count()) { return false }
+        var i: int = 0
+        while (i < a.Count()) {
+            if (a.Get(i) != b.Get(i)) { return false }
+            i = i + 1
+        }
+        return true
+    }
+
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-formats-protobuf — codec tests")
+        var pass: int = 0
+        var fail: int = 0
+
+        // ── 1. Varint round-trip (1-byte + multi-byte) ───────────
+        let w1 = ProtoWriter.New().Varint(1, 0).Varint(2, 300).Varint(3, 16384)
+        let r1 = ProtoReader.New(w1.ToBytes())
+        var v0: int = -9
+        var v300: int = -9
+        var v16384: int = -9
+        while (!r1.AtEnd()) {
+            let f: int = r1.ReadTag()
+            if (f == 1) { v0 = r1.Varint() }
+            else if (f == 2) { v300 = r1.Varint() }
+            else if (f == 3) { v16384 = r1.Varint() }
+            else { r1.Skip() }
+        }
+        if (v0 == 0 && v300 == 300 && v16384 == 16384) {
+            Console.WriteLine("[PASS] varint round-trip (0 / 300 / 16384)")
+            pass = pass + 1
+        } else {
+            Console.WriteLine("[FAIL] varint: " + String_FromInt(v0) + " " + String_FromInt(v300) + " " + String_FromInt(v16384))
+            fail = fail + 1
+        }
+
+        // ── 2. ZigZag signed (Sint) round-trip incl. negatives ───
+        let w2 = ProtoWriter.New().Sint(1, -1).Sint(2, -1000).Sint(3, 2147483647)
+        let r2 = ProtoReader.New(w2.ToBytes())
+        var s1: int = 0
+        var s2: int = 0
+        var s3: int = 0
+        while (!r2.AtEnd()) {
+            let f: int = r2.ReadTag()
+            if (f == 1) { s1 = r2.Sint() }
+            else if (f == 2) { s2 = r2.Sint() }
+            else if (f == 3) { s3 = r2.Sint() }
+            else { r2.Skip() }
+        }
+        if (s1 == -1 && s2 == -1000 && s3 == 2147483647) {
+            Console.WriteLine("[PASS] zigzag sint round-trip (-1 / -1000 / 2147483647)")
+            pass = pass + 1
+        } else {
+            Console.WriteLine("[FAIL] sint: " + String_FromInt(s1) + " " + String_FromInt(s2) + " " + String_FromInt(s3))
+            fail = fail + 1
+        }
+
+        // ── 3. String round-trip ─────────────────────────────────
+        let w3 = ProtoWriter.New().Str(1, "Ada Lovelace").Str(2, "")
+        let r3 = ProtoReader.New(w3.ToBytes())
+        var name: string = "?"
+        var empty: string = "?"
+        while (!r3.AtEnd()) {
+            let f: int = r3.ReadTag()
+            if (f == 1) { name = r3.Str() }
+            else if (f == 2) { empty = r3.Str() }
+            else { r3.Skip() }
+        }
+        if (name == "Ada Lovelace" && String_Length(empty) == 0) {
+            Console.WriteLine("[PASS] string round-trip (incl. empty)")
+            pass = pass + 1
+        } else {
+            Console.WriteLine("[FAIL] string: '" + name + "' / '" + empty + "'")
+            fail = fail + 1
+        }
+
+        // ── 4. Bytes binary-safety (NUL + 0xFF survive) ──────────
+        let payload = new List<int>()
+        payload.Add(0)
+        payload.Add(1)
+        payload.Add(255)
+        payload.Add(0)
+        payload.Add(128)
+        let w4 = ProtoWriter.New().Bytes(1, payload)
+        let r4 = ProtoReader.New(w4.ToBytes())
+        var got: List<int> = new List<int>()
+        while (!r4.AtEnd()) {
+            let f: int = r4.ReadTag()
+            if (f == 1) { got = r4.Bytes() }
+            else { r4.Skip() }
+        }
+        if (Program.listEq(payload, got)) {
+            Console.WriteLine("[PASS] bytes binary-safe (NUL + 0xFF round-trip byte-exact)")
+            pass = pass + 1
+        } else {
+            Console.WriteLine("[FAIL] bytes corrupted (len " + String_FromInt(got.Count()) + ")")
+            fail = fail + 1
+        }
+
+        // ── 5. Fixed64 / Fixed32 / Bool round-trip ───────────────
+        let w5 = ProtoWriter.New().Fixed64(1, 1099511627776).Fixed32(2, 4294967295).Bool(3, true).Bool(4, false)
+        let r5 = ProtoReader.New(w5.ToBytes())
+        var f64: int = 0
+        var f32: int = 0
+        var bt: bool = false
+        var bf: bool = true
+        while (!r5.AtEnd()) {
+            let f: int = r5.ReadTag()
+            if (f == 1) { f64 = r5.Fixed64() }
+            else if (f == 2) { f32 = r5.Fixed32() }
+            else if (f == 3) { bt = r5.Bool() }
+            else if (f == 4) { bf = r5.Bool() }
+            else { r5.Skip() }
+        }
+        if (f64 == 1099511627776 && f32 == 4294967295 && bt && !bf) {
+            Console.WriteLine("[PASS] fixed64 / fixed32 / bool round-trip")
+            pass = pass + 1
+        } else {
+            Console.WriteLine("[FAIL] fixed/bool: " + String_FromInt(f64) + " " + String_FromInt(f32))
+            fail = fail + 1
+        }
+
+        // ── 6. Embedded message + unknown-field skip ─────────────
+        // outer { sub=1: Person{name=1,age=2}, ignored=9: varint }
+        let inner = ProtoWriter.New().Str(1, "Bob").Varint(2, 42).ToBytes()
+        let w6 = ProtoWriter.New().Message(1, inner).Varint(9, 12345)
+        let r6 = ProtoReader.New(w6.ToBytes())
+        var subName: string = "?"
+        var subAge: int = -1
+        var sawUnknown: bool = false
+        while (!r6.AtEnd()) {
+            let f: int = r6.ReadTag()
+            if (f == 1) {
+                let sub = ProtoReader.New(r6.Bytes())
+                while (!sub.AtEnd()) {
+                    let sf: int = sub.ReadTag()
+                    if (sf == 1) { subName = sub.Str() }
+                    else if (sf == 2) { subAge = sub.Varint() }
+                    else { sub.Skip() }
+                }
+            } else {
+                // field 9 is "unknown" to us → must Skip cleanly
+                sawUnknown = true
+                r6.Skip()
+            }
+        }
+        if (subName == "Bob" && subAge == 42 && sawUnknown) {
+            Console.WriteLine("[PASS] embedded message decode + unknown-field skip")
+            pass = pass + 1
+        } else {
+            Console.WriteLine("[FAIL] embedded/skip: '" + subName + "' " + String_FromInt(subAge))
+            fail = fail + 1
+        }
+
+        // ── 7. ZigZag static identities ──────────────────────────
+        let z0: bool = ProtoWriter.zigzag(0) == 0
+        let z1: bool = ProtoWriter.zigzag(-1) == 1
+        let z2: bool = ProtoWriter.zigzag(1) == 2
+        let z3: bool = ProtoWriter.zigzag(-2) == 3
+        let u0: bool = ProtoReader.unzigzag(0) == 0
+        let u1: bool = ProtoReader.unzigzag(1) == -1
+        let u2: bool = ProtoReader.unzigzag(4) == 2
+        if (z0 && z1 && z2 && z3 && u0 && u1 && u2) {
+            Console.WriteLine("[PASS] zigzag/unzigzag identities")
+            pass = pass + 1
+        } else {
+            Console.WriteLine("[FAIL] zigzag identities")
+            fail = fail + 1
+        }
+
+        Console.WriteLine("")
+        Console.WriteLine("Summary: " + String_FromInt(pass) + " passed, " + String_FromInt(fail) + " failed")
+    }
+}

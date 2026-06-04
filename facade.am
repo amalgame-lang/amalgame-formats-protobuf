@@ -1,0 +1,246 @@
+// amalgame-formats-protobuf — Protocol Buffers (proto3) wire-format
+// codec (v0.1.0). The foundation layer for a future gRPC server
+// (amalgame-net-grpc): protobuf messages are length-delimited blobs on
+// the wire, and this encodes/decodes them.
+//
+// Binary-safe by construction: the buffer is a `List<int>` of bytes
+// (each entry 0..255), never a `string`, so embedded NUL bytes and the
+// full 0..255 byte range survive — unlike string-based handling which
+// truncates at the first NUL.
+//
+//   import Amalgame.Formats.Protobuf
+//
+//   // encode  message Person { string name = 1; int32 age = 2; }
+//   let body = ProtoWriter.New()
+//       .Str(1, "Ada")
+//       .Varint(2, 36)
+//       .ToBytes()
+//
+//   // decode
+//   let r = ProtoReader.New(body)
+//   while (!r.AtEnd()) {
+//       let f = r.ReadTag()
+//       if (f == 1) { name = r.Str() }
+//       else if (f == 2) { age = r.Varint() }
+//       else { r.Skip() }
+//   }
+//
+// Scope v0.1.0 (honest): wire-format codec only — varint, zigzag
+// (sint), length-delimited (string/bytes/embedded message), fixed32/
+// fixed64, bool, tag (field<<3|wiretype), unknown-field skip. NOT yet:
+// `.proto` IDL parsing / codegen, full-range negative plain varints
+// (use Sint for negatives; plain Varint expects a non-negative value
+// in [0, 2^62)), groups (deprecated wire types 3/4). Those belong to
+// the codegen + gRPC layers built on top of this.
+
+namespace Amalgame.Formats.Protobuf
+
+import Amalgame.Collections
+
+// Wire types (proto3).
+//   0 = varint        (int32/64, uint32/64, sint*, bool, enum)
+//   1 = 64-bit        (fixed64, sfixed64, double)
+//   2 = length-delim  (string, bytes, embedded message, packed repeated)
+//   5 = 32-bit        (fixed32, sfixed32, float)
+
+public class ProtoWriter {
+    public Buf: List<int>
+
+    public ProtoWriter() { this.Buf = new List<int>() }
+    public static ProtoWriter New() { return new ProtoWriter() }
+
+    // Append the base-128 varint encoding of a NON-NEGATIVE value.
+    private void putVarint(int value) {
+        var v: int = value
+        while (v >= 128) {
+            this.Buf.Add(((v & 127) | 128))
+            v = (v >> 7)
+        }
+        this.Buf.Add((v & 127))
+    }
+
+    private void tag(int field, int wire) {
+        this.putVarint((((field << 3)) | wire))
+    }
+
+    private void putLE(int value, int nbytes) {
+        var i: int = 0
+        while (i < nbytes) {
+            this.Buf.Add(((value >> ((8 * i))) & 255))
+            i = i + 1
+        }
+    }
+
+    // ── scalar fields ───────────────────────────────────────────
+    public ProtoWriter Varint(int field, int value) {
+        this.tag(field, 0)
+        this.putVarint(value)
+        return this
+    }
+    public ProtoWriter Bool(int field, bool b) {
+        var n: int = 0
+        if (b) { n = 1 }
+        return this.Varint(field, n)
+    }
+    // ZigZag-encoded signed int (proto `sint32`/`sint64`) — the right
+    // choice for values that are frequently negative.
+    public ProtoWriter Sint(int field, int value) {
+        this.tag(field, 0)
+        this.putVarint(ProtoWriter.zigzag(value))
+        return this
+    }
+    public ProtoWriter Fixed64(int field, int value) {
+        this.tag(field, 1)
+        this.putLE(value, 8)
+        return this
+    }
+    public ProtoWriter Fixed32(int field, int value) {
+        this.tag(field, 5)
+        this.putLE(value, 4)
+        return this
+    }
+
+    // ── length-delimited fields ─────────────────────────────────
+    public ProtoWriter Bytes(int field, List<int> data) {
+        this.tag(field, 2)
+        this.putVarint(data.Count())
+        var i: int = 0
+        let n: int = data.Count()
+        while (i < n) {
+            this.Buf.Add(data.Get(i))
+            i = i + 1
+        }
+        return this
+    }
+    public ProtoWriter Str(int field, string s) {
+        return this.Bytes(field, ProtoWriter.StrToBytes(s))
+    }
+    // Embedded message = its own encoded bytes, length-delimited.
+    public ProtoWriter Message(int field, List<int> sub) {
+        return this.Bytes(field, sub)
+    }
+
+    public List<int> ToBytes() { return this.Buf }
+
+    // ── helpers ─────────────────────────────────────────────────
+    public static int zigzag(int v) {
+        return (((v << 1)) ^ ((v >> 63)))
+    }
+
+    // UTF-8 string → byte list (frontier: reads the raw bytes of the
+    // AM string up to its NUL terminator — protobuf strings are UTF-8
+    // text without embedded NULs).
+    public static List<int> StrToBytes(string s) {
+        var out: List<int> = new List<int>()
+        @c {
+            const char* p = (const char*) s;
+            if (p) {
+                for (size_t i = 0; p[i] != 0; i++) {
+                    AmalgameList_add(out, (void*)(intptr_t)(unsigned int)(unsigned char) p[i]);
+                }
+            }
+        }
+        return out
+    }
+}
+
+public class ProtoReader {
+    public Buf:   List<int>
+    public Pos:   int
+    public Wire:  int    // wire type of the field returned by the last ReadTag
+
+    public ProtoReader(List<int> buf) {
+        this.Buf  = buf
+        this.Pos  = 0
+        this.Wire = 0
+    }
+    public static ProtoReader New(List<int> buf) { return new ProtoReader(buf) }
+
+    public bool AtEnd() { return this.Pos >= this.Buf.Count() }
+
+    private int getVarint() {
+        var result: int = 0
+        var shift:  int = 0
+        var more:   bool = true
+        while (more) {
+            let b: int = this.Buf.Get(this.Pos)
+            this.Pos = this.Pos + 1
+            result = (result | (((b & 127)) << shift))
+            if ((b & 128) == 0) { more = false }
+            shift = shift + 7
+        }
+        return result
+    }
+
+    private int getLE(int nbytes) {
+        var result: int = 0
+        var i: int = 0
+        while (i < nbytes) {
+            let b: int = this.Buf.Get(this.Pos)
+            this.Pos = this.Pos + 1
+            result = (result | ((b & 255) << ((8 * i))))
+            i = i + 1
+        }
+        return result
+    }
+
+    // Read the next field's tag. Sets Wire and returns the field number
+    // (or -1 at end of buffer).
+    public int ReadTag() {
+        if (this.AtEnd()) { return -1 }
+        let t: int = this.getVarint()
+        this.Wire = (t & 7)
+        return (t >> 3)
+    }
+
+    public int Varint()  { return this.getVarint() }
+    public int Sint()    { return ProtoReader.unzigzag(this.getVarint()) }
+    public bool Bool()   { return this.getVarint() != 0 }
+    public int Fixed64() { return this.getLE(8) }
+    public int Fixed32() { return this.getLE(4) }
+
+    public List<int> Bytes() {
+        let len: int = this.getVarint()
+        var out: List<int> = new List<int>()
+        var i: int = 0
+        while (i < len) {
+            out.Add(this.Buf.Get(this.Pos))
+            this.Pos = this.Pos + 1
+            i = i + 1
+        }
+        return out
+    }
+    public string Str() { return ProtoReader.BytesToStr(this.Bytes()) }
+
+    // Skip the current field (after ReadTag) by its wire type, so
+    // unknown fields don't break forward/backward compatibility.
+    public void Skip() {
+        if (this.Wire == 0) { let v: int = this.getVarint() }
+        else if (this.Wire == 1) { this.Pos = this.Pos + 8 }
+        else if (this.Wire == 5) { this.Pos = this.Pos + 4 }
+        else if (this.Wire == 2) {
+            let len: int = this.getVarint()
+            this.Pos = this.Pos + len
+        }
+    }
+
+    // ── helpers ─────────────────────────────────────────────────
+    public static int unzigzag(int u) {
+        return (((u >> 1)) ^ ((0 - (u & 1))))
+    }
+
+    public static string BytesToStr(List<int> bytes) {
+        var s: string = ""
+        @c {
+            int n = AmalgameList_count(bytes);
+            char* buf = (char*) GC_MALLOC((size_t)(n + 1));
+            for (int i = 0; i < n; i++) {
+                unsigned int b = (unsigned int)(intptr_t) AmalgameList_get(bytes, i);
+                buf[i] = (char)(b & 0xFFu);
+            }
+            buf[n] = 0;
+            s = buf;
+        }
+        return s
+    }
+}

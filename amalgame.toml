@@ -1,8 +1,8 @@
 [package]
 name              = "amalgame-formats-protobuf"
-version           = "0.1.0"
+version           = "0.2.0"
 license           = "Apache-2.0"
-description       = "Protocol Buffers (proto3) wire-format codec — binary-safe encode/decode on List<int> byte buffers. ProtoWriter / ProtoReader cover varint, zigzag (sint), length-delimited (string/bytes/embedded message), fixed32/fixed64, bool, tags and unknown-field skip. The foundation layer for a gRPC server (amalgame-net-grpc). v0.1.0: codec only — .proto IDL codegen + gRPC H2 framing build on top."
+description       = "Protocol Buffers (proto3) wire-format codec — binary-safe encode/decode on List<int> byte buffers. ProtoWriter / ProtoReader cover varint, zigzag (sint), length-delimited (string/bytes/embedded message), fixed32/fixed64, bool, tags and unknown-field skip. The foundation layer for a gRPC server (amalgame-net-grpc). v0.2.0: a proto3 .proto codegen (tools/proto-gen.js) generating Amalgame message classes with Encode/Decode (scalars, repeated, nested messages, binary bytes — round-trip tested). v0.1.0: the wire codec."
 required-amalgame = ">=0.8.58"
 schema-version    = 1
 

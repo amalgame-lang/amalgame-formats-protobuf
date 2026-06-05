@@ -57,6 +57,21 @@ layer that builds on this), groups (deprecated wire types 3/4), and
 full-range negative *plain* varints — use `Sint` for negatives; plain
 `Varint` expects a non-negative value in `[0, 2^62)`.
 
+## Codegen (v0.2.0)
+
+Generate Amalgame message classes from a proto3 `.proto`:
+
+```bash
+node tools/proto-gen.js schema.proto schema_pb.am
+```
+
+Each `message` becomes a `public class` with typed fields and
+`Encode()` / `Decode()` built on `ProtoWriter`/`ProtoReader`. Supports
+scalar fields, `repeated`, nested messages, and binary `bytes`
+(round-trip tested incl. embedded NULs). Not yet: enums, `oneof`,
+`map<>`, imports, services — tracked follow-ups; the output is plain AM
+you can extend.
+
 ## Build & test
 
 ```bash

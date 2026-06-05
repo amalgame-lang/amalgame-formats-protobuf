@@ -1,0 +1,63 @@
+// Round-trip test for proto-gen.js output: build a Person (with a
+// nested Address, a repeated string field, and a binary bytes field
+// containing a NUL), Encode() it, Decode() the bytes back, and assert
+// every field survives. Exercises the generated code AND the underlying
+// codec end-to-end.
+
+// Same namespace as the generated sample_pb.am (Demo.V1) so the
+// generated Person/Address resolve directly — amc binds unqualified
+// names within a namespace, but `import <ns>` only resolves registered
+// packages, not a sibling source file's namespace.
+namespace Demo.V1
+
+import Amalgame.Collections
+import Amalgame.String
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-formats-protobuf — codegen round-trip")
+        var pass: int = 0
+        var fail: int = 0
+
+        let p: Person = Person.New()
+        p.name = "Ada"
+        p.age = 36
+        p.active = true
+        p.tags.Add("math")
+        p.tags.Add("eng\x00ine")     // NUL inside a repeated string
+        let addr: Address = Address.New()
+        addr.city = "London"
+        addr.zip = 12345
+        p.home = addr
+        p.blob.Add(0)
+        p.blob.Add(255)
+        p.blob.Add(0)
+
+        let wire: List<int> = p.Encode()
+        let q: Person = Person.Decode(wire)
+
+        // scalars
+        let scalarsOk: bool = q.name == "Ada" && q.age == 36 && q.active
+        // repeated
+        let repOk: bool = q.tags.Count() == 2 && q.tags.Get(0) == "math" && q.tags.Get(1) == "eng\x00ine"
+        // nested message
+        let nestedOk: bool = q.home != null && q.home.city == "London" && q.home.zip == 12345
+        // binary bytes
+        let blobOk: bool = q.blob.Count() == 3 && q.blob.Get(0) == 0 && q.blob.Get(1) == 255 && q.blob.Get(2) == 0
+
+        if (scalarsOk) { Console.WriteLine("[PASS] scalars (string/int/bool)"); pass = pass + 1 }
+        else { Console.WriteLine("[FAIL] scalars: " + q.name + " " + String_FromInt(q.age)); fail = fail + 1 }
+
+        if (repOk) { Console.WriteLine("[PASS] repeated string (incl. NUL)"); pass = pass + 1 }
+        else { Console.WriteLine("[FAIL] repeated (" + String_FromInt(q.tags.Count()) + ")"); fail = fail + 1 }
+
+        if (nestedOk) { Console.WriteLine("[PASS] nested message (Address)"); pass = pass + 1 }
+        else { Console.WriteLine("[FAIL] nested message"); fail = fail + 1 }
+
+        if (blobOk) { Console.WriteLine("[PASS] bytes binary-safe (NUL/0xFF)"); pass = pass + 1 }
+        else { Console.WriteLine("[FAIL] bytes (" + String_FromInt(q.blob.Count()) + ")"); fail = fail + 1 }
+
+        Console.WriteLine("")
+        Console.WriteLine("Summary: " + String_FromInt(pass) + " passed, " + String_FromInt(fail) + " failed")
+    }
+}

@@ -1,8 +1,8 @@
 [package]
 name              = "amalgame-formats-protobuf"
-version           = "0.2.3"
+version           = "0.2.4"
 license           = "Apache-2.0"
-description       = "Protocol Buffers (proto3) wire-format codec — binary-safe encode/decode on List<int> byte buffers. ProtoWriter / ProtoReader cover varint, zigzag (sint), length-delimited (string/bytes/embedded message), fixed32/fixed64, bool, tags and unknown-field skip. The foundation layer for a gRPC server (amalgame-net-grpc). v0.2.0: a proto3 .proto codegen (tools/proto-gen.js) generating Amalgame message classes with Encode/Decode (scalars, repeated, nested messages, binary bytes — round-trip tested) AND gRPC service stubs (proto `service {}` → typed <Name>Service that wires Closure handlers and RegisterOn(GrpcServer), decoding requests + encoding replies) AND a typed <Name>Client (Dial + one typed method per rpc). v0.2.3: server-streaming rpcs (returns (stream X)) generate typed handlers (Closure<Req, List<Resp>>) + RegisterStream on the server and List<Resp> methods (CallStream) on the client. v0.1.0: the wire codec."
+description       = "Protocol Buffers (proto3) wire-format codec — binary-safe encode/decode on List<int> byte buffers. ProtoWriter / ProtoReader cover varint, zigzag (sint), length-delimited (string/bytes/embedded message), fixed32/fixed64, bool, tags and unknown-field skip. The foundation layer for a gRPC server (amalgame-net-grpc). v0.2.0: a proto3 .proto codegen (tools/proto-gen.js) generating Amalgame message classes with Encode/Decode (scalars, repeated, nested messages, binary bytes — round-trip tested) AND gRPC service stubs (proto `service {}` → typed <Name>Service that wires Closure handlers and RegisterOn(GrpcServer), decoding requests + encoding replies) AND a typed <Name>Client (Dial + one typed method per rpc). v0.2.3: server-streaming rpcs (returns (stream X)) generate typed handlers (Closure<Req, List<Resp>>) + RegisterStream on the server and List<Resp> methods (CallStream) on the client. v0.2.4: client stubs also get DialTls(host,port,insecure) for gRPC over TLS. v0.1.0: the wire codec."
 required-amalgame = ">=0.8.58"
 schema-version    = 1
 

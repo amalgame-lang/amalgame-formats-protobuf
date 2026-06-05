@@ -64,9 +64,9 @@ function parse(src) {
     const rre = /rpc\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*(stream\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*\)\s*returns\s*\(\s*(stream\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*\)/g;
     let r;
     while ((r = rre.exec(s[2])) !== null) {
-      const streaming = !!r[2] || !!r[4];
-      if (streaming) { console.error(`note: skipping streaming rpc ${name}.${r[1]} (unary only in v0.1)`); continue; }
-      methods.push({ name: r[1], reqType: r[3], respType: r[5] });
+      const reqStream = !!r[2], respStream = !!r[4];
+      if (reqStream) { console.error(`note: skipping client-streaming/bidi rpc ${name}.${r[1]} (server-streaming + unary only)`); continue; }
+      methods.push({ name: r[1], reqType: r[3], respType: r[5], serverStream: respStream });
     }
     services.push({ name, methods });
   }
@@ -160,35 +160,51 @@ function gen(parsed) {
     const cls = `${svc.name}Service`;
     const svcPath = (parsed.pkg ? parsed.pkg + '.' : '') + svc.name;   // gRPC path uses the proto package
     out += `// gRPC service ${svcPath} — wire typed handlers, then RegisterOn(server).\n`;
+    const htype = (m) => m.serverStream
+      ? `Closure<${m.reqType}, List<${m.respType}>>`     // server-streaming: handler returns N replies
+      : `Closure<${m.reqType}, ${m.respType}>`;          // unary
     out += `public class ${cls} {\n`;
     for (const mth of svc.methods)
-      out += `    public ${mth.name}: Closure<${mth.reqType}, ${mth.respType}>\n`;
+      out += `    public ${mth.name}: ${htype(mth)}\n`;
     out += `\n    public ${cls}() {\n`;
     for (const mth of svc.methods) out += `        this.${mth.name} = null\n`;
     out += `    }\n    public static ${cls} New() { return new ${cls}() }\n\n`;
     // fluent setters
     for (const mth of svc.methods) {
-      out += `    public ${cls} On${mth.name}(Closure<${mth.reqType}, ${mth.respType}> h) { this.${mth.name} = h; return this }\n`;
+      out += `    public ${cls} On${mth.name}(${htype(mth)} h) { this.${mth.name} = h; return this }\n`;
     }
     out += `\n    // Per-method adapter: decode → typed handler → encode.\n`;
     for (const mth of svc.methods) {
-      out += `    public GrpcReply dispatch${mth.name}(GrpcRequest req) {\n`;
-      out += `        if (this.${mth.name} == null) { return GrpcReply.Error(GrpcStatus.Unimplemented(), "${svcPath}/${mth.name} not implemented") }\n`;
-      out += `        let inMsg: ${mth.reqType} = ${mth.reqType}.Decode(req.Body)\n`;
-      out += `        let outMsg: ${mth.respType} = this.${mth.name}(inMsg)\n`;
-      out += `        return GrpcReply.Ok(outMsg.Encode())\n`;
-      out += `    }\n`;
+      if (mth.serverStream) {
+        out += `    public GrpcStreamReply dispatch${mth.name}(GrpcRequest req) {\n`;
+        out += `        if (this.${mth.name} == null) { return GrpcStreamReply.Error(GrpcStatus.Unimplemented(), "${svcPath}/${mth.name} not implemented") }\n`;
+        out += `        let inMsg: ${mth.reqType} = ${mth.reqType}.Decode(req.Body)\n`;
+        out += `        let outs: List<${mth.respType}> = this.${mth.name}(inMsg)\n`;
+        out += `        var frames: List<List<int>> = new List<List<int>>()\n`;
+        out += `        var _i: int = 0\n`;
+        out += `        while (_i < outs.Count()) { frames.Add(outs.Get(_i).Encode()); _i = _i + 1 }\n`;
+        out += `        return GrpcStreamReply.Ok(frames)\n`;
+        out += `    }\n`;
+      } else {
+        out += `    public GrpcReply dispatch${mth.name}(GrpcRequest req) {\n`;
+        out += `        if (this.${mth.name} == null) { return GrpcReply.Error(GrpcStatus.Unimplemented(), "${svcPath}/${mth.name} not implemented") }\n`;
+        out += `        let inMsg: ${mth.reqType} = ${mth.reqType}.Decode(req.Body)\n`;
+        out += `        let outMsg: ${mth.respType} = this.${mth.name}(inMsg)\n`;
+        out += `        return GrpcReply.Ok(outMsg.Encode())\n`;
+        out += `    }\n`;
+      }
     }
     out += `\n    // Register every method on a GrpcServer.\n`;
     out += `    public void RegisterOn(GrpcServer server) {\n`;
     out += `        let svc0 = this\n`;
     for (const mth of svc.methods) {
-      out += `        server.Register("/${svcPath}/${mth.name}", (r: GrpcRequest) => svc0.dispatch${mth.name}(r))\n`;
+      const reg = mth.serverStream ? 'RegisterStream' : 'Register';
+      out += `        server.${reg}("/${svcPath}/${mth.name}", (r: GrpcRequest) => svc0.dispatch${mth.name}(r))\n`;
     }
     out += `    }\n}\n\n`;
 
-    // Typed client stub: <Name>Client over GrpcClient — one typed unary
-    // method per rpc (encode request → Call → decode reply).
+    // Typed client stub: <Name>Client over GrpcClient — one typed method
+    // per rpc (unary → Resp; server-streaming → List<Resp>).
     const ccls = `${svc.name}Client`;
     out += `// Typed gRPC client for ${svcPath} — Dial then call methods directly.\n`;
     out += `public class ${ccls} {\n`;
@@ -196,13 +212,23 @@ function gen(parsed) {
     out += `    public ${ccls}(GrpcClient backend) { this.Backend = backend }\n`;
     out += `    public static ${ccls} Dial(string host, int port) { return new ${ccls}(GrpcClient.Dial(host, port)) }\n\n`;
     for (const mth of svc.methods) {
-      out += `    // Returns the decoded reply; on a non-OK status the reply\n`;
-      out += `    // message is the default-constructed ${mth.respType} (check via a\n`;
-      out += `    // raw GrpcClient.Call if you need the status).\n`;
-      out += `    public ${mth.respType} ${mth.name}(${mth.reqType} rq) {\n`;
-      out += `        let reply: GrpcReply = this.Backend.Call("/${svcPath}/${mth.name}", rq.Encode())\n`;
-      out += `        return ${mth.respType}.Decode(reply.Body)\n`;
-      out += `    }\n`;
+      if (mth.serverStream) {
+        out += `    // Server-streaming: returns every reply message.\n`;
+        out += `    public List<${mth.respType}> ${mth.name}(${mth.reqType} rq) {\n`;
+        out += `        let sreply: GrpcStreamReply = this.Backend.CallStream("/${svcPath}/${mth.name}", rq.Encode())\n`;
+        out += `        var outs: List<${mth.respType}> = new List<${mth.respType}>()\n`;
+        out += `        var _i: int = 0\n`;
+        out += `        while (_i < sreply.Messages.Count()) { outs.Add(${mth.respType}.Decode(sreply.Messages.Get(_i))); _i = _i + 1 }\n`;
+        out += `        return outs\n`;
+        out += `    }\n`;
+      } else {
+        out += `    // Unary: returns the decoded reply (check status via a raw\n`;
+        out += `    // GrpcClient.Call if you need it).\n`;
+        out += `    public ${mth.respType} ${mth.name}(${mth.reqType} rq) {\n`;
+        out += `        let reply: GrpcReply = this.Backend.Call("/${svcPath}/${mth.name}", rq.Encode())\n`;
+        out += `        return ${mth.respType}.Decode(reply.Body)\n`;
+        out += `    }\n`;
+      }
     }
     out += `}\n\n`;
   }

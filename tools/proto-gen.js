@@ -186,6 +186,25 @@ function gen(parsed) {
       out += `        server.Register("/${svcPath}/${mth.name}", (r: GrpcRequest) => svc0.dispatch${mth.name}(r))\n`;
     }
     out += `    }\n}\n\n`;
+
+    // Typed client stub: <Name>Client over GrpcClient — one typed unary
+    // method per rpc (encode request → Call → decode reply).
+    const ccls = `${svc.name}Client`;
+    out += `// Typed gRPC client for ${svcPath} — Dial then call methods directly.\n`;
+    out += `public class ${ccls} {\n`;
+    out += `    public Backend: GrpcClient\n\n`;
+    out += `    public ${ccls}(GrpcClient backend) { this.Backend = backend }\n`;
+    out += `    public static ${ccls} Dial(string host, int port) { return new ${ccls}(GrpcClient.Dial(host, port)) }\n\n`;
+    for (const mth of svc.methods) {
+      out += `    // Returns the decoded reply; on a non-OK status the reply\n`;
+      out += `    // message is the default-constructed ${mth.respType} (check via a\n`;
+      out += `    // raw GrpcClient.Call if you need the status).\n`;
+      out += `    public ${mth.respType} ${mth.name}(${mth.reqType} rq) {\n`;
+      out += `        let reply: GrpcReply = this.Backend.Call("/${svcPath}/${mth.name}", rq.Encode())\n`;
+      out += `        return ${mth.respType}.Decode(reply.Body)\n`;
+      out += `    }\n`;
+    }
+    out += `}\n\n`;
   }
   return out;
 }

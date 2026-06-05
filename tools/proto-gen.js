@@ -210,7 +210,9 @@ function gen(parsed) {
     out += `public class ${ccls} {\n`;
     out += `    public Backend: GrpcClient\n\n`;
     out += `    public ${ccls}(GrpcClient backend) { this.Backend = backend }\n`;
-    out += `    public static ${ccls} Dial(string host, int port) { return new ${ccls}(GrpcClient.Dial(host, port)) }\n\n`;
+    out += `    public static ${ccls} Dial(string host, int port) { return new ${ccls}(GrpcClient.Dial(host, port)) }\n`;
+    out += `    // gRPC over TLS (insecure = skip cert/hostname verification).\n`;
+    out += `    public static ${ccls} DialTls(string host, int port, bool insecure) { return new ${ccls}(GrpcClient.DialTls(host, port, insecure)) }\n\n`;
     for (const mth of svc.methods) {
       if (mth.serverStream) {
         out += `    // Server-streaming: returns every reply message.\n`;

@@ -54,7 +54,23 @@ function parse(src) {
     }
     messages.push({ name, fields });
   }
-  return { pkg, messages };
+  // Match `service Name { rpc M (Req) returns (Resp); ... }`.
+  const services = [];
+  const sre = /service\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{([^{}]*)\}/g;
+  let s;
+  while ((s = sre.exec(src)) !== null) {
+    const name = s[1];
+    const methods = [];
+    const rre = /rpc\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*(stream\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*\)\s*returns\s*\(\s*(stream\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*\)/g;
+    let r;
+    while ((r = rre.exec(s[2])) !== null) {
+      const streaming = !!r[2] || !!r[4];
+      if (streaming) { console.error(`note: skipping streaming rpc ${name}.${r[1]} (unary only in v0.1)`); continue; }
+      methods.push({ name: r[1], reqType: r[3], respType: r[5] });
+    }
+    services.push({ name, methods });
+  }
+  return { pkg, messages, services };
 }
 
 function nsFromPackage(pkg) {
@@ -88,7 +104,10 @@ function gen(parsed) {
   out += `// Source package: ${parsed.pkg || '(none)'}\n\n`;
   out += `namespace ${ns}\n\n`;
   out += `import Amalgame.Collections\n`;
-  out += `import Amalgame.Formats.Protobuf\n\n`;
+  out += `import Amalgame.Formats.Protobuf\n`;
+  const hasServices = (parsed.services || []).some(s => s.methods.length > 0);
+  if (hasServices) out += `import Amalgame.Net.Grpc\n`;
+  out += `\n`;
 
   for (const msg of parsed.messages) {
     out += `public class ${msg.name} {\n`;
@@ -132,6 +151,41 @@ function gen(parsed) {
     out += first ? `            r.Skip()\n` : `            else { r.Skip() }\n`;
     out += `        }\n        return m\n    }\n`;
     out += `}\n\n`;
+  }
+
+  // Service stubs: a typed handler holder + RegisterOn(GrpcServer) that
+  // decodes the request, calls the typed handler, and encodes the reply.
+  for (const svc of (parsed.services || [])) {
+    if (svc.methods.length === 0) continue;
+    const cls = `${svc.name}Service`;
+    const svcPath = (parsed.pkg ? parsed.pkg + '.' : '') + svc.name;   // gRPC path uses the proto package
+    out += `// gRPC service ${svcPath} — wire typed handlers, then RegisterOn(server).\n`;
+    out += `public class ${cls} {\n`;
+    for (const mth of svc.methods)
+      out += `    public ${mth.name}: Closure<${mth.reqType}, ${mth.respType}>\n`;
+    out += `\n    public ${cls}() {\n`;
+    for (const mth of svc.methods) out += `        this.${mth.name} = null\n`;
+    out += `    }\n    public static ${cls} New() { return new ${cls}() }\n\n`;
+    // fluent setters
+    for (const mth of svc.methods) {
+      out += `    public ${cls} On${mth.name}(Closure<${mth.reqType}, ${mth.respType}> h) { this.${mth.name} = h; return this }\n`;
+    }
+    out += `\n    // Per-method adapter: decode → typed handler → encode.\n`;
+    for (const mth of svc.methods) {
+      out += `    public GrpcReply dispatch${mth.name}(GrpcRequest req) {\n`;
+      out += `        if (this.${mth.name} == null) { return GrpcReply.Error(GrpcStatus.Unimplemented(), "${svcPath}/${mth.name} not implemented") }\n`;
+      out += `        let inMsg: ${mth.reqType} = ${mth.reqType}.Decode(req.Body)\n`;
+      out += `        let outMsg: ${mth.respType} = this.${mth.name}(inMsg)\n`;
+      out += `        return GrpcReply.Ok(outMsg.Encode())\n`;
+      out += `    }\n`;
+    }
+    out += `\n    // Register every method on a GrpcServer.\n`;
+    out += `    public void RegisterOn(GrpcServer server) {\n`;
+    out += `        let svc0 = this\n`;
+    for (const mth of svc.methods) {
+      out += `        server.Register("/${svcPath}/${mth.name}", (r: GrpcRequest) => svc0.dispatch${mth.name}(r))\n`;
+    }
+    out += `    }\n}\n\n`;
   }
   return out;
 }
